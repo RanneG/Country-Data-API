@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template to create an API Gateway and a Lambda function
+  that receives a query parameter (CountryName) and returns data about the country.
+
+Resources:
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: 
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies: 
+        - PolicyName: LambdaBasicExecutionPolicy
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+  
+  # Lambda Function Resource
+  CountryDataLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      FunctionName: CountryDataLambdaFunction
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code: 
+        ZipFile: |
+          import json
+          import csv
+          import urllib.request
+
+          # URL of the CSV file containing country data
+          CSV_URL = "https://raw.githubusercontent.com/icyrockcom/country-capitals/master/data/country-list.csv"
+
+          # Function to load country data from the CSV file
+          def load_country_data():
+              # Fetch the CSV data from the URL
+              response = urllib.request.urlopen(CSV_URL)
+    
+              # Decode the bytes into strings and read lines
+              lines = [l.decode('utf-8') for l in response.readlines()]
+    
+              # Parse CSV lines into a dictionary using csv.DictReader
+              csv_data = csv.DictReader(lines)
+    
+              # Create a dictionary where the key is the country name and the value is the row data
+              countries = {row['country']: row for row in csv_data}
+    
+              return countries
+
+          # Lambda handler function
+          def lambda_handler(event, context):
+              # Check if the 'queryStringParameters' key exists in the event
+              if 'queryStringParameters' not in event or event['queryStringParameters'] is None:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'No query parameters found'})
+                  }
+
+              # Extract the 'CountryName' parameter from the query string
+              country_name = event['queryStringParameters'].get('CountryName')
+              
+              # Check if 'CountryName' is provided
+              if not country_name:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'CountryName query parameter is required'})
+                  }
+
+              # Load the country data from the CSV
+              countries = load_country_data()
+              
+              # Find the data for the provided country name
+              country_data = countries.get(country_name)
+
+              # Return the country data if found, otherwise return a 404 error
+              if country_data:
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(country_data)
+                  }
+              else:
+                  return {
+                      'statusCode': 404,
+                      'body': json.dumps({'error': f'Country {country_name} not found'})
+                  }
+
+      Runtime: python3.12
+      MemorySize: 128
+      Timeout: 10
+  
+  # API Gateway Resource
+  CountryDataApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties: 
+      Name: CountryDataApi
+      Description: "API Gateway for fetching country data."
+
+  # API Gateway Resource (Endpoint)
+  CountryDataResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt CountryDataApi.RootResourceId
+      PathPart: "country"
+      RestApiId: !Ref CountryDataApi
+
+  # API Gateway Method (GET /country)
+  CountryDataGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      ResourceId: !Ref CountryDataResource
+      RestApiId: !Ref CountryDataApi
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: 
+          Fn::Sub: 
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+            - LambdaArn: !GetAtt CountryDataLambdaFunction.Arn
+
+  # Permission for API Gateway to invoke Lambda
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CountryDataLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  # API Gateway Deployment (Deploys the API Gateway)
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: CountryDataGetMethod
+    Properties:
+      RestApiId: !Ref CountryDataApi
+      StageName: prod
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: 
+      Fn::Sub: "https://${CountryDataApi}.execute-api.${AWS::Region}.amazonaws.com/prod/country"
+
